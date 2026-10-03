@@ -82,6 +82,8 @@ export interface WasteRect {
   y: number
   w: number
   h: number
+  /** 是否够尺寸再当相纸用（太窄的条也会列出，但标记为不可再用） */
+  usable?: boolean
 }
 
 export interface PackStats {
@@ -144,7 +146,24 @@ export interface Leftover {
   marginMm: number
   priceCents: number
   createdAt: number
+  /** 被排样用掉的次数（用掉即物理消耗，同时 exhausted 置真） */
   usedCount: number
+  /** 来源任务 id（早期/手工登记的没有来源信息） */
+  sourceTaskId?: string
+  /** 来源任务名（冗余保存，任务删除后仍能看出是哪来的） */
+  sourceTaskName?: string
+  /** 来源相纸序号（从 1 开始） */
+  sourceSheetNo?: number
+  /** 在来源相纸上的位置 mm */
+  sourceX?: number
+  sourceY?: number
+  /** 太窄/太小，不能再当相纸，仅登记占位 */
+  unusable?: boolean
+  /** 已被排样用掉（整张已裁开消耗），不许再选 */
+  exhausted?: boolean
+  /** 被哪个任务用掉 */
+  consumedByTaskId?: string
+  consumedByTaskName?: string
 }
 
 export interface Settings {

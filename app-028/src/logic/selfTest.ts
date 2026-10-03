@@ -3,10 +3,17 @@
  */
 import { validateCutSequence, type CutLine, type Rect } from './guillotine'
 import { BUILTIN_PAPERS, BUILTIN_PHOTO_SIZES } from './library'
+import {
+  addLeftoverTo,
+  consumeLeftoverIn,
+  LEFTOVER_MIN_USABLE_MM,
+  leftoverRemainingAreaMm2,
+  leftoverStatus,
+} from './leftover'
 import { pack, sheetsFromPlacements, usableRegion, type PackGroup, type PackOptions } from './packer'
 import { buildPdf } from './pdf'
 import { MM_TO_PT, mmToPt, mmToPx, pxToMm } from './units'
-import type { Paper, Placement, Sheet } from './types'
+import type { Leftover, Paper, Placement, Sheet } from './types'
 
 export interface AssertionResult {
   id: string
@@ -482,6 +489,87 @@ function assertPerformance(): AssertionResult {
   }
 }
 
+/** ⑧ 余料登记：带来源去重、太窄标记、用掉后不可再选 */
+function assertLeftoverLifecycle(): AssertionResult {
+  const t0 = performance.now()
+  const problems: string[] = []
+
+  // 排样结果应把太窄的余料条也列出来并标记不可再用
+  const out = pack(
+    [{ itemId: 'w', copies: 1, photoW: 95, photoH: 60, allowRotate: false, keepTogether: false }],
+    {
+      paperW: 100,
+      paperH: 100,
+      marginMm: 0,
+      safeEdgeMm: 0,
+      gapMm: 0,
+      kerfMm: 0,
+      allowRotate: false,
+    },
+  )
+  const wastes = out.result.sheets[0]?.wasteRects ?? []
+  const narrow = wastes.find((w) => w.w < LEFTOVER_MIN_USABLE_MM || w.h < LEFTOVER_MIN_USABLE_MM)
+  if (!narrow) problems.push('排样应把太窄的余料条也列入 wasteRects，而不是丢弃')
+  if (narrow && narrow.usable !== false) problems.push('太窄的余料条应标记 usable=false')
+  const big = wastes.find((w) => w.w >= LEFTOVER_MIN_USABLE_MM && w.h >= LEFTOVER_MIN_USABLE_MM)
+  if (!big || big.usable !== true) problems.push('够尺寸的余料块应标记 usable=true')
+
+  // 登记：同一来源同一位置只留一条；位置不同各记一条
+  let list: Leftover[] = []
+  const base = {
+    name: '任务A 余料',
+    wMm: 120.5,
+    hMm: 80,
+    marginMm: 0,
+    priceCents: 0,
+    sourceTaskId: 'task-a',
+    sourceTaskName: '任务A',
+    sourceSheetNo: 1,
+    sourceX: 10,
+    sourceY: 20,
+  }
+  const r1 = addLeftoverTo(list, base, 'lo-1', 1)
+  list = r1.list
+  if (r1.duplicated || list.length !== 1) problems.push('首次登记应新增 1 条')
+  const r2 = addLeftoverTo(list, { ...base }, 'lo-2', 2)
+  list = r2.list
+  if (!r2.duplicated || list.length !== 1) problems.push('同一来源同一位置重复登记应被去重')
+  if (r2.item.id !== 'lo-1') problems.push('重复登记应返回已存在的那条')
+  const r3 = addLeftoverTo(list, { ...base, sourceX: 130.5 }, 'lo-3', 3)
+  list = r3.list
+  if (r3.duplicated || list.length !== 2) problems.push('同一来源不同位置应各记一条')
+  const r4 = addLeftoverTo(list, { ...base, wMm: 5, sourceX: 0, unusable: true }, 'lo-4', 4)
+  list = r4.list
+  if (leftoverStatus(r4.item) !== 'narrow') problems.push('太窄余料应标记为不可再用')
+
+  // 消耗：用掉后已用完、剩余归 0、记录去向，且不能被重复消耗
+  list = consumeLeftoverIn(list, 'lo-1', { id: 'task-b', name: '任务B' })
+  const used = list.find((l) => l.id === 'lo-1')
+  if (!used?.exhausted || used.usedCount !== 1) problems.push('余料被用掉后应标记已用完且计数为 1')
+  if (used && leftoverStatus(used) !== 'exhausted') problems.push('已用完余料不应再可选')
+  if (used && leftoverRemainingAreaMm2(used) !== 0) problems.push('已用完余料剩余面积应为 0')
+  if (used?.consumedByTaskName !== '任务B') problems.push('已用完余料应记录被哪个任务用掉')
+  list = consumeLeftoverIn(list, 'lo-1', { id: 'task-c', name: '任务C' })
+  const twice = list.find((l) => l.id === 'lo-1')
+  if (!twice || twice.usedCount !== 1 || twice.consumedByTaskId !== 'task-b') {
+    problems.push('已用完的余料不应被重复消耗')
+  }
+  const untouched = list.find((l) => l.id === 'lo-3')
+  if (!untouched || leftoverStatus(untouched) !== 'usable') {
+    problems.push('消耗一块余料不应影响同一张纸上的其它余料')
+  }
+
+  return {
+    id: 'leftover',
+    title: '⑧ 余料登记：带来源与位置、按来源去重、太窄标记、用掉后不可再选',
+    pass: problems.length === 0,
+    detail: problems.length
+      ? problems.join('；')
+      : `太窄余料条列入 wasteRects 并标记不可再用；同一来源同一位置重复登记被去重；用掉后标记已用完、剩余归 0、记录去向，且不会被重复消耗`,
+    ms: Math.round(performance.now() - t0),
+  }
+}
+
 export async function runSelfTest(): Promise<AssertionResult[]> {
   const results: AssertionResult[] = []
   results.push(assertGuillotine())
@@ -501,5 +589,6 @@ export async function runSelfTest(): Promise<AssertionResult[]> {
     })
   }
   results.push(assertPerformance())
+  results.push(assertLeftoverLifecycle())
   return results
 }

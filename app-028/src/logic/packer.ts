@@ -4,6 +4,7 @@
  * 沿一条整边切成两个子矩形，因此结果天然满足「每一刀都能直线裁到底」。
  */
 import { EPS, planSheetCuts, toCutSteps, type Rect } from './guillotine'
+import { LEFTOVER_MIN_USABLE_MM } from './leftover'
 import { round } from './units'
 import type { PackResult, PackStats, Placement, Sheet, WasteRect } from './types'
 
@@ -112,13 +113,15 @@ export function sheetsFromPlacements(
     const cutSteps = toCutSteps(s, plan.cuts, plan.rawCuts)
     const usedAreaMm2 = list.reduce((acc, p) => acc + p.w * p.h, 0)
     const sheetAreaMm2 = opts.paperW * opts.paperH
+    // 余料块全部列出（只滤掉 <1mm 的刀缝碎屑）；太窄的标记 usable=false，仍占地方
     const wasteRects: WasteRect[] = plan.pieces
-      .filter((pc) => pc.idx.length === 0 && pc.r.w >= 8 && pc.r.h >= 8)
+      .filter((pc) => pc.idx.length === 0 && pc.r.w >= 1 && pc.r.h >= 1)
       .map((pc) => ({
         x: round(pc.r.x, 3),
         y: round(pc.r.y, 3),
         w: round(pc.r.w, 3),
         h: round(pc.r.h, 3),
+        usable: pc.r.w >= LEFTOVER_MIN_USABLE_MM && pc.r.h >= LEFTOVER_MIN_USABLE_MM,
       }))
     sheets.push({
       index: s,

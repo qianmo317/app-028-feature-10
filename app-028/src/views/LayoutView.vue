@@ -8,6 +8,7 @@ import {
   allPapers,
   allSizes,
   getTask,
+  leftovers,
   makeThumbResolver,
   manualPlacementsOf,
   resetManual,
@@ -16,10 +17,16 @@ import {
   photoVersion,
 } from '../store'
 import { comparePapers, computeCost } from '../logic/cost'
+import {
+  LEFTOVER_MIN_USABLE_MM,
+  sameLeftoverSource,
+  wasteRectUsable,
+  type LeftoverInput,
+} from '../logic/leftover'
 import { findPhotoSize, groupsFromTask, resolvePaper, sizeLabel } from '../logic/library'
 import { formatCents, formatPercent } from '../logic/units'
 import type { PaperCompare } from '../logic/cost'
-import type { Placement, Task } from '../logic/types'
+import type { Placement, Task, WasteRect } from '../logic/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -210,23 +217,66 @@ function doReset() {
   selectedSeq.value = -1
 }
 
-function registerWaste(w: number, h: number) {
+/** 余料块 -> 登记内容（带来源任务、第几张纸与纸上位置；太窄的标记不可再用） */
+function wasteToDraft(r: WasteRect): LeftoverInput {
   const t = task.value
-  if (!t) return
-  addLeftover({
-    name: `${t.name} 余料`,
-    wMm: Math.round(w * 10) / 10,
-    hMm: Math.round(h * 10) / 10,
+  const s = sheet.value
+  return {
+    name: `${t?.name ?? '未命名任务'} 余料`,
+    wMm: Math.round(r.w * 10) / 10,
+    hMm: Math.round(r.h * 10) / 10,
     marginMm: 0,
     priceCents: 0,
-  })
-  localMsg.value = `已登记余料 ${w.toFixed(1)}×${h.toFixed(1)}mm`
+    sourceTaskId: t?.id,
+    sourceTaskName: t?.name,
+    sourceSheetNo: (s?.index ?? 0) + 1,
+    sourceX: Math.round(r.x * 10) / 10,
+    sourceY: Math.round(r.y * 10) / 10,
+    unusable: !wasteRectUsable(r),
+  }
+}
+
+/** 该位置的余料是否已登记过（同一张纸同一位置只留一条） */
+function isRegistered(r: WasteRect): boolean {
+  if (!task.value) return false
+  const draft = wasteToDraft(r)
+  return leftovers.value.some((l) => sameLeftoverSource(l, draft))
+}
+
+function registerWaste(r: WasteRect): 'added' | 'duplicated' {
+  const usable = wasteRectUsable(r)
+  const { duplicated } = addLeftover(wasteToDraft(r))
+  if (duplicated) return 'duplicated'
+  localMsg.value = usable
+    ? `已登记余料 ${r.w.toFixed(1)}×${r.h.toFixed(1)}mm（来源：第 ${(sheet.value?.index ?? 0) + 1} 张）`
+    : `已登记余料 ${r.w.toFixed(1)}×${r.h.toFixed(1)}mm：太窄不足 ${LEFTOVER_MIN_USABLE_MM}mm，仅记录占位，不可再当相纸`
+  return 'added'
+}
+
+function onRegisterOne(r: WasteRect) {
+  if (registerWaste(r) === 'duplicated') {
+    localMsg.value = `该位置（${r.x.toFixed(1)}, ${r.y.toFixed(1)}）的余料已登记过，未重复添加`
+  }
 }
 
 function registerAllWaste() {
   const s = sheet.value
   if (!s) return
-  for (const r of s.wasteRects) registerWaste(r.w, r.h)
+  let added = 0
+  let narrow = 0
+  let dup = 0
+  for (const r of s.wasteRects) {
+    if (registerWaste(r) === 'duplicated') {
+      dup++
+    } else {
+      added++
+      if (!wasteRectUsable(r)) narrow++
+    }
+  }
+  localMsg.value =
+    `新登记 ${added} 块余料` +
+    (narrow ? `（含 ${narrow} 块太窄仅占位）` : '') +
+    (dup ? `，${dup} 块已登记过被跳过` : '')
 }
 
 function selectedInfo() {
@@ -484,13 +534,17 @@ watch(
               全部登记
             </button>
           </h3>
-          <div class="card-sub">把剩下的纸边记录下来，下次排样优先使用</div>
+          <div class="card-sub">
+            登记时带来源（本任务 · 第 {{ activeSheet + 1 }} 张 · 纸上位置），同一位置只留一条；
+            任一边不足 {{ LEFTOVER_MIN_USABLE_MM }}mm 的窄条仅记录占位，不可再当相纸
+          </div>
           <div v-if="!sheet?.wasteRects.length" class="note">本张相纸没有可登记的余料</div>
           <table v-else class="data">
             <thead>
               <tr>
                 <th class="num">位置 mm</th>
                 <th class="num">尺寸 mm</th>
+                <th>状态</th>
                 <th></th>
               </tr>
             </thead>
@@ -499,7 +553,12 @@ watch(
                 <td class="num">{{ r.x.toFixed(1) }} / {{ r.y.toFixed(1) }}</td>
                 <td class="num">{{ r.w.toFixed(1) }} × {{ r.h.toFixed(1) }}</td>
                 <td>
-                  <button class="btn small" @click="registerWaste(r.w, r.h)">登记</button>
+                  <span v-if="!wasteRectUsable(r)" class="badge warn">太窄</span>
+                  <span v-else class="badge ok">可用</span>
+                </td>
+                <td>
+                  <button v-if="isRegistered(r)" class="btn small" disabled>已登记</button>
+                  <button v-else class="btn small" @click="onRegisterOne(r)">登记</button>
                 </td>
               </tr>
             </tbody>

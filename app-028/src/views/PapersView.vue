@@ -12,7 +12,9 @@ import {
   templates,
 } from '../store'
 import { BUILTIN_PAPERS, BUILTIN_PHOTO_SIZES } from '../logic/library'
+import { leftoverRemainingAreaMm2, leftoverStatus } from '../logic/leftover'
 import { formatCents, inchToMm } from '../logic/units'
+import type { Leftover } from '../logic/types'
 
 const error = ref('')
 const msg = ref('')
@@ -63,6 +65,28 @@ function addSize() {
 
 function inchHint(wMm: number, hMm: number): string {
   return `${(wMm / inchToMm(1)).toFixed(2)}″ × ${(hMm / inchToMm(1)).toFixed(2)}″`
+}
+
+function leftoverStatusText(l: Leftover): string {
+  const s = leftoverStatus(l)
+  return s === 'exhausted' ? '已用完' : s === 'narrow' ? '太窄不可用' : '可用'
+}
+
+function leftoverStatusClass(l: Leftover): string {
+  const s = leftoverStatus(l)
+  return s === 'exhausted' ? 'danger' : s === 'narrow' ? 'warn' : 'ok'
+}
+
+function leftoverSourceText(l: Leftover): string {
+  if (!l.sourceTaskName) return '手工登记'
+  const sheet = l.sourceSheetNo ? ` · 第 ${l.sourceSheetNo} 张` : ''
+  const pos = l.sourceX !== undefined ? ` · (${l.sourceX}, ${l.sourceY})` : ''
+  return `${l.sourceTaskName}${sheet}${pos}`
+}
+
+function leftoverRemainingText(l: Leftover): string {
+  if (l.exhausted) return '0（已裁完）'
+  return `${leftoverRemainingAreaMm2(l).toFixed(0)} mm²`
 }
 </script>
 
@@ -242,13 +266,19 @@ function inchHint(wMm: number, hMm: number): string {
 
     <div class="card">
       <h3>余料库（{{ leftovers.length }}）</h3>
-      <div class="card-sub">在「排样预览」页把剩余纸边登记进来，下次排样可直接用作相纸</div>
+      <div class="card-sub">
+        在「排样预览」页把剩余纸边登记进来，下次排样可直接用作相纸；同一位置只留一条，
+        太窄的仅记录占位，被用掉的标记已用完且不能再选
+      </div>
       <div v-if="!leftovers.length" class="note">暂无登记余料</div>
       <table v-else class="data">
         <thead>
           <tr>
             <th>名称</th>
+            <th>来源</th>
             <th class="num">尺寸 mm</th>
+            <th>状态</th>
+            <th class="num">剩余面积</th>
             <th class="num">已使用次数</th>
             <th></th>
           </tr>
@@ -256,7 +286,21 @@ function inchHint(wMm: number, hMm: number): string {
         <tbody>
           <tr v-for="l in leftovers" :key="l.id">
             <td>{{ l.name }}</td>
+            <td>{{ leftoverSourceText(l) }}</td>
             <td class="num">{{ l.wMm }} × {{ l.hMm }}</td>
+            <td>
+              <span class="badge" :class="leftoverStatusClass(l)">
+                {{ leftoverStatusText(l) }}
+              </span>
+              <div
+                v-if="l.exhausted && l.consumedByTaskName"
+                class="mono"
+                style="font-size: 11px; color: var(--ink-3)"
+              >
+                被「{{ l.consumedByTaskName }}」用掉
+              </div>
+            </td>
+            <td class="num">{{ leftoverRemainingText(l) }}</td>
             <td class="num">{{ l.usedCount }}</td>
             <td><button class="btn small danger" @click="removeLeftover(l.id)">删除</button></td>
           </tr>

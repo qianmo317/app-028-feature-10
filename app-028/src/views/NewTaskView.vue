@@ -1,16 +1,16 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   addCustomSize,
   allPapers,
   allSizes,
   clearItemPhoto,
+  consumeLeftover,
   createTask,
   deleteTask,
   getItemPhoto,
   leftovers,
-  markLeftoverUsed,
   photoKey,
   photoVersion,
   runPack,
@@ -19,6 +19,7 @@ import {
   tasks,
   templates,
 } from '../store'
+import { leftoverStatus } from '../logic/leftover'
 import { findPhotoSize, newId } from '../logic/library'
 import { formatCents, formatPercent } from '../logic/units'
 import type { Item, Paper, PhotoRef, Task } from '../logic/types'
@@ -44,7 +45,17 @@ const draft = reactive({
   allowRotate: settings.value.allowRotate,
   headerText: '',
   footerText: '',
+  /** 已选作相纸的余料 id；提交排样成功后才真正消耗 */
+  leftoverId: '',
 })
+
+/** 改用其它相纸时，取消余料的预选 */
+watch(
+  () => draft.paperId,
+  (id) => {
+    if (id !== 'custom') draft.leftoverId = ''
+  },
+)
 
 const error = ref('')
 const hint = ref('')
@@ -151,7 +162,7 @@ function removeFile(item: Item, copyIndex: number) {
 
 function useLeftover(id: string) {
   const l = leftovers.value.find((x) => x.id === id)
-  if (!l) return
+  if (!l || leftoverStatus(l) !== 'usable') return
   draft.paperId = 'custom'
   draft.customPaper = {
     id: 'custom',
@@ -162,8 +173,8 @@ function useLeftover(id: string) {
     priceCents: l.priceCents,
     kind: 'sheet',
   }
-  markLeftoverUsed(id)
-  hint.value = `已使用余料「${l.name}」${l.wMm}×${l.hMm}mm`
+  draft.leftoverId = id
+  hint.value = `已选余料「${l.name}」${l.wMm}×${l.hMm}mm 作相纸，提交排样后它将标记为已用完`
 }
 
 function addSize() {
@@ -212,6 +223,11 @@ function submit() {
   if (err) {
     error.value = err
     return
+  }
+  // 排样成功才真正消耗余料：标记已用完，之后不许再选
+  if (draft.leftoverId) {
+    consumeLeftover(draft.leftoverId, { id: task.id, name: task.name })
+    draft.leftoverId = ''
   }
   router.push(`/layout/${task.id}`)
 }
@@ -317,23 +333,63 @@ function taskPaperName(t: Task) {
 
         <div class="card">
           <h3>余料库</h3>
-          <div class="card-sub">排样剩下的纸边可以登记，下次优先用余料</div>
+          <div class="card-sub">
+            排样剩下的纸边可以登记，下次优先用余料；被用掉的余料会标记已用完，不能再选
+          </div>
           <div v-if="!leftovers.length" class="note">暂无登记余料，可在「排样预览」页把剩余纸边登记进来</div>
           <table v-else class="data">
             <thead>
               <tr>
                 <th>余料</th>
                 <th class="num">尺寸 mm</th>
+                <th>状态</th>
                 <th class="num">用过</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="l in leftovers" :key="l.id">
-                <td>{{ l.name }}</td>
+                <td>
+                  {{ l.name }}
+                  <div
+                    v-if="l.sourceSheetNo"
+                    class="mono"
+                    style="font-size: 11px; color: var(--ink-3)"
+                  >
+                    第 {{ l.sourceSheetNo }} 张 · ({{ l.sourceX }}, {{ l.sourceY }})
+                  </div>
+                </td>
                 <td class="num">{{ l.wMm }}×{{ l.hMm }}</td>
+                <td>
+                  <span
+                    class="badge"
+                    :class="
+                      leftoverStatus(l) === 'usable'
+                        ? 'ok'
+                        : leftoverStatus(l) === 'narrow'
+                          ? 'warn'
+                          : 'danger'
+                    "
+                  >
+                    {{
+                      leftoverStatus(l) === 'usable'
+                        ? '可用'
+                        : leftoverStatus(l) === 'narrow'
+                          ? '太窄不可用'
+                          : '已用完'
+                    }}
+                  </span>
+                </td>
                 <td class="num">{{ l.usedCount }}</td>
-                <td><button class="btn small" @click="useLeftover(l.id)">用作相纸</button></td>
+                <td>
+                  <button
+                    class="btn small"
+                    :disabled="leftoverStatus(l) !== 'usable'"
+                    @click="useLeftover(l.id)"
+                  >
+                    用作相纸
+                  </button>
+                </td>
               </tr>
             </tbody>
           </table>

@@ -10,6 +10,11 @@ import {
   resolvePaper,
 } from './logic/library'
 import { pack, sheetsFromPlacements } from './logic/packer'
+import {
+  addLeftoverTo,
+  consumeLeftoverIn,
+  type LeftoverInput,
+} from './logic/leftover'
 import { loadJSON, saveJSON } from './logic/storage'
 import type {
   Leftover,
@@ -224,23 +229,18 @@ export function removeCustomSize(id: string): void {
   customSizes.value = customSizes.value.filter((s) => s.id !== id)
 }
 
-export function addLeftover(l: Omit<Leftover, 'id' | 'createdAt' | 'usedCount'>): Leftover {
-  const item: Leftover = {
-    ...l,
-    id: newId('leftover'),
-    createdAt: Date.now(),
-    usedCount: 0,
-  }
-  leftovers.value = [item, ...leftovers.value]
-  return item
+/** 登记余料：按来源（任务 + 第几张 + 位置 + 尺寸）去重，重复登记返回已存在的那条 */
+export function addLeftover(l: LeftoverInput): { item: Leftover; duplicated: boolean } {
+  const r = addLeftoverTo(leftovers.value, l, newId('leftover'), Date.now())
+  leftovers.value = r.list
+  return { item: r.item, duplicated: r.duplicated }
 }
 
 export function removeLeftover(id: string): void {
   leftovers.value = leftovers.value.filter((l) => l.id !== id)
 }
 
-export function markLeftoverUsed(id: string): void {
-  leftovers.value = leftovers.value.map((l) =>
-    l.id === id ? { ...l, usedCount: l.usedCount + 1 } : l,
-  )
+/** 余料被某个任务排样用掉：标记已用完并记录去向，已用完的不许再选 */
+export function consumeLeftover(id: string, task: { id: string; name: string }): void {
+  leftovers.value = consumeLeftoverIn(leftovers.value, id, task)
 }
