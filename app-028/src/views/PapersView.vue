@@ -13,6 +13,8 @@ import {
 } from '../store'
 import { BUILTIN_PAPERS, BUILTIN_PHOTO_SIZES } from '../logic/library'
 import { formatCents, inchToMm } from '../logic/units'
+import { canUseLeftover, sourceLabel, statusLabel, totalAreaMm2 } from '../logic/leftovers'
+import type { Leftover } from '../logic/types'
 
 const error = ref('')
 const msg = ref('')
@@ -63,6 +65,24 @@ function addSize() {
 
 function inchHint(wMm: number, hMm: number): string {
   return `${(wMm / inchToMm(1)).toFixed(2)}″ × ${(hMm / inchToMm(1)).toFixed(2)}″`
+}
+
+/** 当前剩余面积占初始面积的百分比（初始 = 现存 + 历次用掉） */
+function remainPct(l: Leftover): string {
+  const total = totalAreaMm2(l)
+  const used = l.uses.reduce((acc, u) => acc + u.rect.w * u.rect.h, 0)
+  const initial = total + used
+  return initial > 0 ? `${Math.round((total / initial) * 100)}%` : '—'
+}
+
+function shapeText(l: Leftover): string {
+  if (l.rects.length <= 1) return `${l.wMm} × ${l.hMm}`
+  const reusable = l.rects.filter((r) => r.reusable).length
+  const narrow = l.rects.length - reusable
+  const parts = [`${l.rects.length} 块`]
+  if (reusable) parts.push(`${reusable} 可用`)
+  if (narrow) parts.push(`${narrow} 窄条`)
+  return parts.join('，')
 }
 </script>
 
@@ -242,22 +262,39 @@ function inchHint(wMm: number, hMm: number): string {
 
     <div class="card">
       <h3>余料库（{{ leftovers.length }}）</h3>
-      <div class="card-sub">在「排样预览」页把剩余纸边登记进来，下次排样可直接用作相纸</div>
+      <div class="card-sub">
+        在「排样预览」页把剩余纸边按来源与位置登记进来；被排样用过后自动扣减，用完的不能再选
+      </div>
       <div v-if="!leftovers.length" class="note">暂无登记余料</div>
       <table v-else class="data">
         <thead>
           <tr>
             <th>名称</th>
-            <th class="num">尺寸 mm</th>
-            <th class="num">已使用次数</th>
+            <th>来源 / 位置</th>
+            <th class="num">当前尺寸 mm</th>
+            <th class="num">剩余量</th>
+            <th class="num">用过次数</th>
+            <th>状态</th>
             <th></th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="l in leftovers" :key="l.id">
             <td>{{ l.name }}</td>
+            <td>
+              <div class="mono" style="font-size: 11.5px">{{ sourceLabel(l) }}</div>
+              <div v-if="l.rects.length" class="mono" style="font-size: 11px; color: var(--ink-3)">
+                形状：{{ shapeText(l) }}
+              </div>
+            </td>
             <td class="num">{{ l.wMm }} × {{ l.hMm }}</td>
+            <td class="num">{{ remainPct(l) }}</td>
             <td class="num">{{ l.usedCount }}</td>
+            <td>
+              <span class="badge" :class="canUseLeftover(l) ? 'ok' : 'danger'">
+                {{ statusLabel(l) }}
+              </span>
+            </td>
             <td><button class="btn small danger" @click="removeLeftover(l.id)">删除</button></td>
           </tr>
         </tbody>

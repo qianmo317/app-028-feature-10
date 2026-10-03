@@ -8,6 +8,7 @@ import {
   allPapers,
   allSizes,
   getTask,
+  makeLeftoverSource,
   makeThumbResolver,
   manualPlacementsOf,
   resetManual,
@@ -17,9 +18,10 @@ import {
 } from '../store'
 import { comparePapers, computeCost } from '../logic/cost'
 import { findPhotoSize, groupsFromTask, resolvePaper, sizeLabel } from '../logic/library'
+import { MIN_REUSABLE_MM } from '../logic/leftovers'
 import { formatCents, formatPercent } from '../logic/units'
 import type { PaperCompare } from '../logic/cost'
-import type { Placement, Task } from '../logic/types'
+import type { Placement, Task, WasteRect } from '../logic/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -210,23 +212,67 @@ function doReset() {
   selectedSeq.value = -1
 }
 
-function registerWaste(w: number, h: number) {
+function registerWaste(r: WasteRect) {
   const t = task.value
   if (!t) return
-  addLeftover({
+  const { duplicated } = addLeftover({
     name: `${t.name} 余料`,
-    wMm: Math.round(w * 10) / 10,
-    hMm: Math.round(h * 10) / 10,
+    wMm: Math.round(r.w * 10) / 10,
+    hMm: Math.round(r.h * 10) / 10,
     marginMm: 0,
     priceCents: 0,
+    source: makeLeftoverSource(t, activeSheet.value),
+    rects: [
+      {
+        x: Math.round(r.x * 10) / 10,
+        y: Math.round(r.y * 10) / 10,
+        w: Math.round(r.w * 10) / 10,
+        h: Math.round(r.h * 10) / 10,
+        reusable: r.reusable,
+      },
+    ],
   })
-  localMsg.value = `已登记余料 ${w.toFixed(1)}×${h.toFixed(1)}mm`
+  const tag = r.reusable ? '' : '（窄条，已标为不可再用）'
+  localMsg.value = duplicated
+    ? `这块余料已登记过（同一张纸同一位置），已自动跳过`
+    : `已登记余料 ${r.w.toFixed(1)}×${r.h.toFixed(1)}mm${tag}`
 }
 
 function registerAllWaste() {
   const s = sheet.value
-  if (!s) return
-  for (const r of s.wasteRects) registerWaste(r.w, r.h)
+  const t = task.value
+  if (!s || !t) return
+  let added = 0
+  let skipped = 0
+  let unusable = 0
+  for (const r of s.wasteRects) {
+    const { duplicated } = addLeftover({
+      name: `${t.name} 余料`,
+      wMm: Math.round(r.w * 10) / 10,
+      hMm: Math.round(r.h * 10) / 10,
+      marginMm: 0,
+      priceCents: 0,
+      source: makeLeftoverSource(t, activeSheet.value),
+      rects: [
+        {
+          x: Math.round(r.x * 10) / 10,
+          y: Math.round(r.y * 10) / 10,
+          w: Math.round(r.w * 10) / 10,
+          h: Math.round(r.h * 10) / 10,
+          reusable: r.reusable,
+        },
+      ],
+    })
+    if (duplicated) skipped++
+    else {
+      added++
+      if (!r.reusable) unusable++
+    }
+  }
+  const parts = [`已登记 ${added} 块`]
+  if (unusable) parts.push(`其中 ${unusable} 块窄条不可再用`)
+  if (skipped) parts.push(`跳过 ${skipped} 块重复登记`)
+  localMsg.value = parts.join('，')
 }
 
 function selectedInfo() {
@@ -484,13 +530,17 @@ watch(
               全部登记
             </button>
           </h3>
-          <div class="card-sub">把剩下的纸边记录下来，下次排样优先使用</div>
+          <div class="card-sub">
+            把剩下的纸边记录下来（带来源与位置），下次排样优先使用；窄于
+            {{ MIN_REUSABLE_MM }}mm 的纸条也登记，但标为不可再用
+          </div>
           <div v-if="!sheet?.wasteRects.length" class="note">本张相纸没有可登记的余料</div>
           <table v-else class="data">
             <thead>
               <tr>
                 <th class="num">位置 mm</th>
                 <th class="num">尺寸 mm</th>
+                <th>形状</th>
                 <th></th>
               </tr>
             </thead>
@@ -499,7 +549,11 @@ watch(
                 <td class="num">{{ r.x.toFixed(1) }} / {{ r.y.toFixed(1) }}</td>
                 <td class="num">{{ r.w.toFixed(1) }} × {{ r.h.toFixed(1) }}</td>
                 <td>
-                  <button class="btn small" @click="registerWaste(r.w, r.h)">登记</button>
+                  <span v-if="r.reusable" class="badge ok">可复用</span>
+                  <span v-else class="badge danger">窄条·不可再用</span>
+                </td>
+                <td>
+                  <button class="btn small" @click="registerWaste(r)">登记</button>
                 </td>
               </tr>
             </tbody>

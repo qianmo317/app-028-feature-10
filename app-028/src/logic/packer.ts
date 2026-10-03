@@ -5,6 +5,7 @@
  */
 import { EPS, planSheetCuts, toCutSteps, type Rect } from './guillotine'
 import { round } from './units'
+import { MIN_REUSABLE_MM } from './leftovers'
 import type { PackResult, PackStats, Placement, Sheet, WasteRect } from './types'
 
 export interface PackGroup {
@@ -43,6 +44,35 @@ export function usableRegion(opts: PackOptions): Rect | null {
   const h = round(opts.paperH - 2 * inset, 4)
   if (w <= 0 || h <= 0) return null
   return { x: inset, y: inset, w, h }
+}
+
+/** 小于该尺寸的碎屑（刀缝/浮点残渣）不登记到余料 */
+export const MIN_SCRAP_MM = 0.5
+
+/**
+ * 可用区（纸边留白 + 安全边以内）之外的纸边框，拆成四条矩形。
+ * 这些条占着纸面但永远不能再排照片：登记为不可复用余料。
+ */
+export function edgeFrameRects(opts: PackOptions): WasteRect[] {
+  const inset = opts.marginMm + opts.safeEdgeMm
+  if (inset <= EPS) return []
+  const { paperW: W, paperH: H } = opts
+  const out: WasteRect[] = []
+  const push = (x: number, y: number, w: number, h: number) => {
+    if (w < MIN_SCRAP_MM - EPS || h < MIN_SCRAP_MM - EPS) return
+    out.push({
+      x: round(x, 3),
+      y: round(y, 3),
+      w: round(w, 3),
+      h: round(h, 3),
+      reusable: false,
+    })
+  }
+  push(0, 0, W, inset) // 上
+  push(0, H - inset, W, inset) // 下
+  push(0, inset, inset, H - 2 * inset) // 左
+  push(W - inset, inset, inset, H - 2 * inset) // 右
+  return out
 }
 
 export function emptyResult(elapsedMs = 0): PackResult {
@@ -112,14 +142,24 @@ export function sheetsFromPlacements(
     const cutSteps = toCutSteps(s, plan.cuts, plan.rawCuts)
     const usedAreaMm2 = list.reduce((acc, p) => acc + p.w * p.h, 0)
     const sheetAreaMm2 = opts.paperW * opts.paperH
-    const wasteRects: WasteRect[] = plan.pieces
-      .filter((pc) => pc.idx.length === 0 && pc.r.w >= 8 && pc.r.h >= 8)
+    // 可用区内部的废料块：太窄的条也保留（reusable=false，登记但不可再用）
+    const innerWaste: WasteRect[] = plan.pieces
+      .filter(
+        (pc) =>
+          pc.idx.length === 0 &&
+          pc.r.w >= MIN_SCRAP_MM - EPS &&
+          pc.r.h >= MIN_SCRAP_MM - EPS,
+      )
       .map((pc) => ({
         x: round(pc.r.x, 3),
         y: round(pc.r.y, 3),
         w: round(pc.r.w, 3),
         h: round(pc.r.h, 3),
+        reusable: pc.r.w >= MIN_REUSABLE_MM - EPS && pc.r.h >= MIN_REUSABLE_MM - EPS,
       }))
+    // 可用区外的纸边（留白 + 安全边）：占着纸但永远不能再排照片
+    const edgeWaste = edgeFrameRects(opts)
+    const wasteRects = [...edgeWaste, ...innerWaste]
     sheets.push({
       index: s,
       placements: list,

@@ -3,10 +3,19 @@
  */
 import { validateCutSequence, type CutLine, type Rect } from './guillotine'
 import { BUILTIN_PAPERS, BUILTIN_PHOTO_SIZES } from './library'
-import { pack, sheetsFromPlacements, usableRegion, type PackGroup, type PackOptions } from './packer'
+import { pack, sheetsFromPlacements, usableRegion, edgeFrameRects, type PackGroup, type PackOptions } from './packer'
+import {
+  buildLeftover,
+  canUseLeftover,
+  consumeLeftover,
+  migrateLeftover,
+  MIN_REUSABLE_MM,
+  registerLeftover,
+  type LeftoverDraft,
+} from './leftovers'
 import { buildPdf } from './pdf'
 import { MM_TO_PT, mmToPt, mmToPx, pxToMm } from './units'
-import type { Paper, Placement, Sheet } from './types'
+import type { LeftoverRect, LeftoverSource, Paper, Placement, Sheet } from './types'
 
 export interface AssertionResult {
   id: string
@@ -482,6 +491,203 @@ function assertPerformance(): AssertionResult {
   }
 }
 
+/** ⑧ 余料登记：带来源按位置去重、窄条入库不可用、用后按废料扣减、用完不可再选 */
+function assertLeftovers(): AssertionResult {
+  const t0 = performance.now()
+  const problems: string[] = []
+  const source: LeftoverSource = {
+    kind: 'task',
+    taskId: 't1',
+    taskName: '测试单',
+    sheetIndex: 0,
+    paperName: '5×7',
+    paperWMm: 127,
+    paperHMm: 178,
+  }
+  const rect = (w: number, h: number, x = 0, y = 0): LeftoverRect => ({
+    x,
+    y,
+    w,
+    h,
+    reusable: w >= MIN_REUSABLE_MM && h >= MIN_REUSABLE_MM,
+  })
+
+  // (a) 窄条：登记成功但不可再选
+  const stripDraft: LeftoverDraft = {
+    name: '窄条',
+    wMm: 127,
+    hMm: 3,
+    marginMm: 0,
+    priceCents: 0,
+    source,
+  }
+  const strip = buildLeftover(stripDraft)
+  if (strip.status !== 'unusable') problems.push('3mm 窄条应标记为 unusable')
+  if (canUseLeftover(strip)) problems.push('3mm 窄条不应能被选作相纸')
+
+  // (b) 同一张纸同位置连点两次：按来源去重，不产生第二条
+  const usableDraft: LeftoverDraft = {
+    name: '余料',
+    wMm: 60,
+    hMm: 80,
+    marginMm: 0,
+    priceCents: 0,
+    source,
+    rects: [rect(60, 80, 10, 20)],
+  }
+  const r1 = registerLeftover([], usableDraft)
+  const r2 = registerLeftover([r1.leftover], usableDraft)
+  if (r1.duplicated || !r2.duplicated || r2.leftover.id !== r1.leftover.id) {
+    problems.push('同源同位置的余料第二次登记应被去重')
+  }
+  // 同一张纸的不同位置：不去重
+  const otherDraft: LeftoverDraft = {
+    ...usableDraft,
+    rects: [rect(60, 80, 10, 110)],
+  }
+  const r3 = registerLeftover([r1.leftover], otherDraft)
+  if (r3.duplicated) problems.push('同一张纸不同位置的余料不应被去重')
+
+  // (c) 用后扣减：100×100 余料排一张 40×40，废料几何回写、计数 +1
+  const big = buildLeftover({
+    name: '大块',
+    wMm: 100,
+    hMm: 100,
+    marginMm: 0,
+    priceCents: 0,
+  })
+  const opts: PackOptions = {
+    paperW: 100,
+    paperH: 100,
+    marginMm: 0,
+    safeEdgeMm: 0,
+    gapMm: 0,
+    kerfMm: 0,
+    allowRotate: false,
+  }
+  const out = pack(
+    [{ itemId: 'a', copies: 1, photoW: 40, photoH: 40, allowRotate: false, keepTogether: false }],
+    opts,
+  )
+  if (out.error || !out.result.sheets.length) {
+    problems.push(`扣减用排样失败：${out.error ?? '无版面'}`)
+  } else {
+    const used = big.rects[0]
+    const after = consumeLeftover(big, used, out.result.sheets[0], 'task-x', '消耗单')
+    if (after.usedCount !== 1 || after.uses.length !== 1) problems.push('消耗后用过次数应为 1')
+    if (!after.rects.length) problems.push('用掉一张 40×40 后应仍有剩余矩形')
+    const remainArea = after.rects.reduce((acc, r) => acc + r.w * r.h, 0)
+    if (Math.abs(remainArea - (10000 - 1600)) > 1) {
+      problems.push(`扣减后剩余面积应为 8400mm²，实际 ${remainArea.toFixed(0)}`)
+    }
+    if (after.status !== 'usable' || !canUseLeftover(after)) {
+      problems.push('扣减后仍有大块可复用时状态应为 usable')
+    }
+  }
+
+  // (d) 整纸排满 -> used_up，不许再选
+  const full = pack(
+    [{ itemId: 'a', copies: 4, photoW: 50, photoH: 50, allowRotate: false, keepTogether: false }],
+    opts,
+  )
+  if (full.error || !full.result.sheets.length) {
+    problems.push('排满用例排样失败')
+  } else {
+    const fullPaper = buildLeftover({ name: '满', wMm: 100, hMm: 100, marginMm: 0, priceCents: 0 })
+    const after = consumeLeftover(fullPaper, fullPaper.rects[0], full.result.sheets[0], 't', '满单')
+    if (after.status !== 'used_up' || canUseLeftover(after)) {
+      problems.push('整块用满后应标记 used_up 且不可再选')
+    }
+    if (after.usedCount !== 1) problems.push('used_up 时用过次数也应记录')
+  }
+
+  // (e) 用掉的区域与登记块对不上（异常/手工改尺寸）-> 保守标用完，禁止被反复选
+  const mismatchSheet: Sheet = {
+    index: 0,
+    placements: [],
+    cutSteps: [],
+    rawCutCount: 0,
+    usedAreaMm2: 0,
+    sheetAreaMm2: 900,
+    utilization: 0,
+    wasteRects: [],
+  }
+  const guarded = consumeLeftover(big, rect(30, 30, 200, 200), mismatchSheet, 't', '异常单')
+  if (guarded.status !== 'used_up') problems.push('用掉区域对不上登记块时应保守标记 used_up')
+
+  // (f) 旧版数据迁移：没有 rects/status 的老记录也能正常展示与选用
+  const migrated = migrateLeftover({
+    id: 'old',
+    name: '老余料',
+    wMm: 50,
+    hMm: 60,
+    marginMm: 0,
+    priceCents: 0,
+    createdAt: 1,
+    usedCount: 2,
+  })
+  if (migrated.status !== 'usable' || !canUseLeftover(migrated) || migrated.usedCount !== 2) {
+    problems.push('旧版余料迁移后应保持可复用且保留用过次数')
+  }
+
+  // (g) 废料几何守恒：照片切块 + 可用区内废料 + 纸边框 恰好铺满整张相纸（窄条也在内）
+  const geomOpts: PackOptions = {
+    paperW: 127,
+    paperH: 178,
+    marginMm: 3,
+    safeEdgeMm: 3,
+    gapMm: 0,
+    kerfMm: 0.5,
+    allowRotate: false,
+  }
+  const gOut = pack(
+    [{ itemId: 'b', copies: 6, photoW: 25, photoH: 35, allowRotate: false, keepTogether: false }],
+    geomOpts,
+  )
+  if (gOut.error) {
+    problems.push(`几何守恒用例排样失败：${gOut.error}`)
+  } else {
+    const sheetArea = geomOpts.paperW * geomOpts.paperH
+    for (const s of gOut.result.sheets) {
+      const m = (geomOpts.kerfMm + geomOpts.gapMm) / 2
+      const photoArea = s.placements.reduce(
+        (acc, p) => acc + (p.w + 2 * m) * (p.h + 2 * m),
+        0,
+      )
+      const region = usableRegion(geomOpts)!
+      const frameArea = edgeFrameRects(geomOpts).reduce((acc, r) => acc + r.w * r.h, 0)
+      const expectedFrame = sheetArea - region.w * region.h
+      if (Math.abs(frameArea - expectedFrame) > 1) {
+        problems.push(
+          `纸边框面积应为 ${expectedFrame.toFixed(0)}mm²，实际 ${frameArea.toFixed(0)}`,
+        )
+      }
+      const wasteArea = s.wasteRects.reduce((acc, r) => acc + r.w * r.h, 0)
+      const covered = photoArea + wasteArea
+      if (Math.abs(covered - sheetArea) > 2) {
+        problems.push(
+          `第 ${s.index + 1} 张：照片切块 ${photoArea.toFixed(0)} + 废料 ${wasteArea.toFixed(
+            0,
+          )} = ${covered.toFixed(0)} ≠ 纸张 ${sheetArea.toFixed(0)}`,
+        )
+      }
+      // 窄条必须真的被保留（带 reusable=false），不再被静默丢弃
+      const narrow = s.wasteRects.filter((r) => !r.reusable)
+      if (!narrow.length) problems.push(`第 ${s.index + 1} 张：窄纸边未被登记为不可复用余料`)
+    }
+  }
+
+  return {
+    id: 'leftover',
+    title: '⑧ 余料：来源去重、窄条登记不可用、用后按区域扣减、用完禁选；废料几何铺满整纸',
+    pass: problems.length === 0,
+    detail: problems.length
+      ? problems.join('；')
+      : '窄条 unusable 不可选；同源同位置重复登记被去重、不同位置保留；40×40 扣减后余 8400mm² 仍可用；50×50×4 排满后 used_up 禁选；异常消耗保守收口；旧数据迁移正常；含纸边在内废料几何守恒',
+    ms: Math.round(performance.now() - t0),
+  }
+}
+
 export async function runSelfTest(): Promise<AssertionResult[]> {
   const results: AssertionResult[] = []
   results.push(assertGuillotine())
@@ -501,5 +707,6 @@ export async function runSelfTest(): Promise<AssertionResult[]> {
     })
   }
   results.push(assertPerformance())
+  results.push(assertLeftovers())
   return results
 }

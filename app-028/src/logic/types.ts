@@ -82,6 +82,8 @@ export interface WasteRect {
   y: number
   w: number
   h: number
+  /** 是否大到还能再排照片（窄纸边为 false：登记后标为不可复用） */
+  reusable: boolean
 }
 
 export interface PackStats {
@@ -133,18 +135,68 @@ export interface Task {
     validationMs: number
     stepCount: number
   }
+  /** 用掉这块余料的任务（余料被用作相纸时记录） */
+  consumedLeftoverId?: string
+  /** 选中的余料可复用块在原余料上的偏移（mm）；未用余料时为 0 */
+  leftoverOffsetMm?: { x: number; y: number }
   result?: PackResult
+}
+
+/**
+ * 余料状态：
+ *  - usable：至少还有一块大到能再排照片的矩形
+ *  - unusable：登记时就是窄纸边（两边都不够最小可复用尺寸），只能记账、不能选
+ *  - used_up：被排样用过后，剩余区域没有可复用块了
+ */
+export type LeftoverStatus = 'usable' | 'unusable' | 'used_up'
+
+/** 余料内一个矩形区域（整块登记时只有一个；被用过后按废料几何扣减为多个） */
+export interface LeftoverRect {
+  x: number
+  y: number
+  w: number
+  h: number
+  /** false = 太窄（纸边/刀缝条），只登记占地，不可再排照片 */
+  reusable: boolean
+}
+
+/** 余料来源：哪张任务的哪张纸上、哪块位置 */
+export interface LeftoverSource {
+  kind: 'task'
+  taskId: string
+  taskName: string
+  sheetIndex: number
+  paperName: string
+  /** 该纸原始尺寸 */
+  paperWMm: number
+  paperHMm: number
+}
+
+export interface LeftoverUse {
+  taskId: string
+  taskName: string
+  /** 本次用掉的区域（余料坐标系，mm） */
+  rect: LeftoverRect
+  at: number
 }
 
 export interface Leftover {
   id: string
   name: string
+  /** 当前有效尺寸：登记时的尺寸；被用过后取最大剩余块（同时也是可用区） */
   wMm: number
   hMm: number
   marginMm: number
   priceCents: number
   createdAt: number
   usedCount: number
+  status: LeftoverStatus
+  /** 来源（手工补录的老数据可能没有） */
+  source?: LeftoverSource
+  /** 形状/位置：一个或多个剩余矩形，坐标相对原纸 */
+  rects: LeftoverRect[]
+  /** 被哪些任务用过（每次排样消耗记一条） */
+  uses: LeftoverUse[]
 }
 
 export interface Settings {

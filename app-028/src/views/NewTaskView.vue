@@ -10,10 +10,10 @@ import {
   deleteTask,
   getItemPhoto,
   leftovers,
-  markLeftoverUsed,
   photoKey,
   photoVersion,
   runPack,
+  selectLeftoverPaper,
   setItemPhoto,
   settings,
   tasks,
@@ -21,13 +21,14 @@ import {
 } from '../store'
 import { findPhotoSize, newId } from '../logic/library'
 import { formatCents, formatPercent } from '../logic/units'
-import type { Item, Paper, PhotoRef, Task } from '../logic/types'
+import { canUseLeftover, sourceLabel, statusLabel, totalAreaMm2 } from '../logic/leftovers'
+import type { Item, Leftover, LeftoverRect, Paper, PhotoRef, Task } from '../logic/types'
 
 const router = useRouter()
 
 const draft = reactive({
   name: '',
-  paperId: 'p5x7',
+  paperId: 'p5x7' as string,
   customPaper: {
     id: 'custom',
     name: '自定义相纸',
@@ -45,6 +46,14 @@ const draft = reactive({
   headerText: '',
   footerText: '',
 })
+
+/** 当前选用的余料及其块（提交排样成功后扣减） */
+const selectedLeftover = ref<{ leftover: Leftover; rect: LeftoverRect } | null>(null)
+
+function onPaperSelect() {
+  // 切换到内置相纸时清掉余料选择
+  if (draft.paperId !== 'custom') selectedLeftover.value = null
+}
 
 const error = ref('')
 const hint = ref('')
@@ -150,20 +159,31 @@ function removeFile(item: Item, copyIndex: number) {
 }
 
 function useLeftover(id: string) {
-  const l = leftovers.value.find((x) => x.id === id)
-  if (!l) return
+  const picked = selectLeftoverPaper(id)
+  if (!picked) {
+    hint.value = '这块余料已用完或只剩窄条，不能再用作相纸'
+    return
+  }
+  selectedLeftover.value = picked
   draft.paperId = 'custom'
   draft.customPaper = {
     id: 'custom',
-    name: `余料 ${l.name}`,
-    wMm: l.wMm,
-    hMm: l.hMm,
-    marginMm: l.marginMm,
-    priceCents: l.priceCents,
+    name: `余料 ${picked.leftover.name}`,
+    wMm: Math.round(picked.rect.w * 10) / 10,
+    hMm: Math.round(picked.rect.h * 10) / 10,
+    marginMm: picked.leftover.marginMm,
+    priceCents: picked.leftover.priceCents,
     kind: 'sheet',
   }
-  markLeftoverUsed(id)
-  hint.value = `已使用余料「${l.name}」${l.wMm}×${l.hMm}mm`
+  hint.value = `已选用余料「${picked.leftover.name}」的剩余块 ${picked.rect.w.toFixed(1)}×${picked.rect.h.toFixed(1)}mm（排样成功后自动扣减）`
+}
+
+/** 余料当前剩余面积占初始面积的百分比（初始 = 现存 + 历次用掉） */
+function leftoverRemainPct(l: Leftover): string {
+  const total = totalAreaMm2(l)
+  const used = l.uses.reduce((acc, u) => acc + u.rect.w * u.rect.h, 0)
+  const initial = total + used
+  return initial > 0 ? formatPercent(total / initial, 0) : '—'
 }
 
 function addSize() {
@@ -207,12 +227,21 @@ function submit() {
     allowRotate: draft.allowRotate,
     headerText: draft.headerText,
     footerText: draft.footerText,
+    consumedLeftoverId:
+      draft.paperId === 'custom' && selectedLeftover.value
+        ? selectedLeftover.value.leftover.id
+        : undefined,
+    leftoverOffsetMm:
+      draft.paperId === 'custom' && selectedLeftover.value
+        ? { x: selectedLeftover.value.rect.x, y: selectedLeftover.value.rect.y }
+        : undefined,
   })
   const err = runPack(task)
   if (err) {
     error.value = err
     return
   }
+  selectedLeftover.value = null
   router.push(`/layout/${task.id}`)
 }
 
@@ -246,11 +275,11 @@ function taskPaperName(t: Task) {
           <div class="stack">
             <label class="field">
               相纸
-              <select v-model="draft.paperId">
+              <select v-model="draft.paperId" @change="onPaperSelect">
                 <option v-for="p in allPapers" :key="p.id" :value="p.id">
                   {{ p.name }} · {{ p.wMm }}×{{ p.hMm }}mm · {{ formatCents(p.priceCents) }}/张
                 </option>
-                <option value="custom">自定义相纸…</option>
+                <option value="custom">自定义相纸 / 余料…</option>
               </select>
             </label>
             <div v-if="draft.paperId === 'custom'" class="grid cols-2">
@@ -317,23 +346,44 @@ function taskPaperName(t: Task) {
 
         <div class="card">
           <h3>余料库</h3>
-          <div class="card-sub">排样剩下的纸边可以登记，下次优先用余料</div>
+          <div class="card-sub">
+            排样剩下的纸边可以登记，下次优先用余料；点「用作相纸」会选最大的剩余块，排样成功后自动扣减
+          </div>
           <div v-if="!leftovers.length" class="note">暂无登记余料，可在「排样预览」页把剩余纸边登记进来</div>
           <table v-else class="data">
             <thead>
               <tr>
-                <th>余料</th>
-                <th class="num">尺寸 mm</th>
+                <th>余料 / 来源</th>
+                <th class="num">剩余 mm</th>
+                <th class="num">剩余量</th>
                 <th class="num">用过</th>
+                <th>状态</th>
                 <th></th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="l in leftovers" :key="l.id">
-                <td>{{ l.name }}</td>
+                <td>
+                  <div>{{ l.name }}</div>
+                  <div class="mono" style="font-size: 11px; color: var(--ink-3)">{{ sourceLabel(l) }}</div>
+                </td>
                 <td class="num">{{ l.wMm }}×{{ l.hMm }}</td>
+                <td class="num">{{ leftoverRemainPct(l) }}</td>
                 <td class="num">{{ l.usedCount }}</td>
-                <td><button class="btn small" @click="useLeftover(l.id)">用作相纸</button></td>
+                <td>
+                  <span class="badge" :class="canUseLeftover(l) ? 'ok' : 'danger'">
+                    {{ statusLabel(l) }}
+                  </span>
+                </td>
+                <td>
+                  <button
+                    class="btn small"
+                    :disabled="!canUseLeftover(l)"
+                    @click="useLeftover(l.id)"
+                  >
+                    用作相纸
+                  </button>
+                </td>
               </tr>
             </tbody>
           </table>
